@@ -347,24 +347,23 @@ class SummaryDashboardWidget(QWidget):
         # 2.1 左侧图表
         self.fig = Figure(figsize=(8, 8), dpi=100)
         self.canvas = FigureCanvas(self.fig)
-        self.ax = self.fig.add_subplot(111, polar=True)
+        self.ax = self.fig.add_subplot(111)
 
-        # 2.2 右侧文字和表格
+        # 2.2 右侧智能摘要与交叉矩阵
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         self.summary_text = QTextEdit();
         self.summary_text.setReadOnly(True)
-        self.top_risks_table = QTableView();
-        self.top_risks_table.setAlternatingRowColors(True)
+        self.cross_analysis_table = QTableWidget();
 
-        right_layout.addWidget(QLabel("<b>自动分析摘要</b>"))
+        right_layout.addWidget(QLabel("<b>智能分析与建议</b>"))
         right_layout.addWidget(self.summary_text)
-        right_layout.addWidget(QLabel("<b>高风险项 Top 5</b>"))
-        right_layout.addWidget(self.top_risks_table)
+        right_layout.addWidget(QLabel("<b>风险/功能 交叉分析矩阵</b>"))
+        right_layout.addWidget(self.cross_analysis_table)
 
         splitter.addWidget(self.canvas)
         splitter.addWidget(right_panel)
-        splitter.setSizes([700, 400])
+        splitter.setSizes([700, 450])
 
         main_layout.addLayout(kpi_layout)
         main_layout.addWidget(splitter)
@@ -380,17 +379,20 @@ class SummaryDashboardWidget(QWidget):
         df = self.fha_model.get_dataframe()
         self._update_kpis(df)
         self._update_sunburst_chart(df)
-        self._update_summary_text(df)
-        self._update_top_risks_table(df)
+        self._update_cross_analysis(df)
 
     def _clear_dashboard(self):
         self.total_label.setText("总条目数: 0")
         self.cat_label.setText("灾难级: 0")
         self.haz_label.setText("危险级: 0")
         self.ax.clear();
+        if self.fig.legends:
+            self.fig.legends.clear()
         self.canvas.draw()
         self.summary_text.clear()
-        self.top_risks_table.setModel(None)
+        self.cross_analysis_table.clear()
+        self.cross_analysis_table.setRowCount(0)
+        self.cross_analysis_table.setColumnCount(0)
 
     def _update_kpis(self, df):
         total_items = len(df[df['失效状态'] != ''])
@@ -404,95 +406,121 @@ class SummaryDashboardWidget(QWidget):
 
     def _update_sunburst_chart(self, df):
         self.ax.clear()
+        if self.fig.legends:
+            self.fig.legends.clear()
 
-        df_filtered = df[(df['一级功能'] != '') & (df['危害性分类'] != '')]
+        df_filtered = df[
+            (df['一级功能'] != '') & (df['危害性分类'] != '') & (df['危害性分类'] != '无安全影响 (No Safety Effect)')]
         if df_filtered.empty:
-            self.ax.text(0, 0, '无可用数据', ha='center', va='center')
-            self.ax.set_axis_off();
+            self.ax.text(0.5, 0.5, '无可用数据', ha='center', va='center', transform=self.ax.transAxes)
+            self.ax.set_axis_off()
             self.canvas.draw()
             return
 
+        # --- 数据准备 ---
         data = df_filtered.groupby(['一级功能', '危害性分类']).size().reset_index(name='size')
-        color_map = {"灾难的 (Catastrophic)": "#D32F2F", "危险的 (Hazardous)": "#FFA000", "严重的 (Major)": "#388E3C",
-                     "轻微的 (Minor)": "#1976D2", "无安全影响 (No Safety Effect)": "#BDBDBD"}
+        func_sizes = data.groupby('一级功能')['size'].sum()
+        hazard_counts = data.groupby('危害性分类')['size'].sum()
 
-        self.ax.set_theta_zero_location('N');
-        self.ax.set_theta_direction(-1)
-        self.ax.set_rlim(0, 2);
+        color_map = {
+            "灾难的 (Catastrophic)": "#D32F2F",
+            "危险的 (Hazardous)": "#FFA000",
+            "严重的 (Major)": "#388E3C",
+            "轻微的 (Minor)": "#1976D2",
+        }
+
+        # --- 颜色优化：使用高对比度的颜色集tab20 ---
+        func_colors = plt.cm.tab20(np.linspace(0, 1, len(func_sizes.index)))
+        func_color_map = {func: color for func, color in zip(func_sizes.index, func_colors)}
+
+        # --- 绘制旭日图 ---
+        self.ax.set_aspect('equal')
         self.ax.set_axis_off()
 
-        func_sizes = data.groupby('一级功能')['size'].sum()
-        unique_funcs = func_sizes.index
-        func_colors = plt.cm.Pastel1(np.linspace(0, 1, len(unique_funcs)))
-        func_color_map = {func: color for func, color in zip(unique_funcs, func_colors)}
+        self.ax.pie(func_sizes, radius=0.6, colors=[func_color_map[f] for f in func_sizes.index],
+                    wedgeprops=dict(width=0.3, edgecolor='w'))
 
-        # 内圈
-        self.ax.bar(x=np.deg2rad(np.cumsum([0] + func_sizes.tolist()[:-1]) / func_sizes.sum() * 360),
-                    height=1, width=np.deg2rad(func_sizes / func_sizes.sum() * 360),
-                    bottom=0, color=[func_color_map[f] for f in func_sizes.index], edgecolor='white', linewidth=1,
-                    align='edge')
-
-        for i, (name, size) in enumerate(func_sizes.items()):
-            angle = 360 * (np.sum(func_sizes[:i]) + size / 2) / func_sizes.sum()
-            rotation = np.rad2deg(np.deg2rad(angle))
-            if 90 < rotation < 270:
-                rotation -= 180; ha = 'right'
-            else:
-                ha = 'left'
-            self.ax.text(np.deg2rad(angle), 0.5, name, rotation=rotation, ha=ha, va='center')
-
-        # 外圈
-        start_angle = 0
+        all_hazard_sizes = []
+        all_hazard_colors = []
         for func_name in func_sizes.index:
-            func_group = data[data['一级功能'] == func_name]
-            for _, row in func_group.iterrows():
-                width = row['size'] / func_sizes.sum() * 360
-                self.ax.bar(x=np.deg2rad(start_angle), height=1, width=np.deg2rad(width),
-                            bottom=1, color=color_map.get(row['危害性分类'], 'grey'),
-                            edgecolor='white', linewidth=1, align='edge')
-                start_angle += width
+            func_group = data[data['一级功能'] == func_name].set_index('危害性分类')
+            for cat in color_map:
+                if cat in func_group.index:
+                    all_hazard_sizes.append(func_group.loc[cat, 'size'])
+                    all_hazard_colors.append(color_map[cat])
+
+        self.ax.pie(all_hazard_sizes, radius=0.9, colors=all_hazard_colors,
+                    wedgeprops=dict(width=0.3, edgecolor='w'))
+
+        # --- 将所有图例合并到右侧 ---
+        all_patches = []
+        func_patches = [mpatches.Patch(color=func_color_map[name], label=f"{name}: {size}")
+                        for name, size in func_sizes.items()]
+        all_patches.extend(func_patches)
+        all_patches.append(mpatches.Patch(color='white', label=""))
+        hazard_patches = [mpatches.Patch(color=color, label=f"{label.split(' ')[0]}: {hazard_counts.get(label, 0)}")
+                          for label, color in color_map.items() if label in hazard_counts]
+        all_patches.extend(hazard_patches)
+
+        self.fig.legend(handles=all_patches, title="图例", loc='center right', bbox_to_anchor=(1.0, 0.5))
 
         self.ax.set_title("FHA 风险分布旭日图", pad=20)
-        self.fig.tight_layout()
+        self.fig.tight_layout(rect=[0, 0, 0.8, 1])
         self.canvas.draw()
 
-    def _update_summary_text(self, df):
-        text = ""
-        df_analyzed = df[df['危害性分类'] != '']
+    def _update_cross_analysis(self, df):
+        df_analyzed = df[(df['一级功能'] != '') & (df['危害性分类'] != '')].copy()
         if df_analyzed.empty:
-            text = "暂无已完成分析的条目。";
-            self.summary_text.setText(text);
+            self.summary_text.setText("暂无已完成分析的条目。")
+            self.cross_analysis_table.clear()
+            self.cross_analysis_table.setRowCount(0)
+            self.cross_analysis_table.setColumnCount(0)
             return
 
+        # --- 生成交叉分析矩阵 ---
+        cross_tab = pd.crosstab(df_analyzed['一级功能'], df_analyzed['危害性分类'])
+        ordered_cols = [col for col in FHA_Model.ARP4761_CATEGORIES if col in cross_tab.columns and col != ""]
+        cross_tab = cross_tab.reindex(columns=ordered_cols)
+
+        # --- 填充QTableWidget ---
+        self.cross_analysis_table.setRowCount(cross_tab.shape[0])
+        self.cross_analysis_table.setColumnCount(cross_tab.shape[1])
+        self.cross_analysis_table.setVerticalHeaderLabels(cross_tab.index)
+        self.cross_analysis_table.setHorizontalHeaderLabels([col.split(' ')[0] for col in cross_tab.columns])
+
+        for r, row_label in enumerate(cross_tab.index):
+            for c, col_label in enumerate(cross_tab.columns):
+                value = cross_tab.loc[row_label, col_label]
+                item = QTableWidgetItem(str(value))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if value > 0:
+                    intensity = min(255, 50 + value * 40)
+                    item.setBackground(QColor(255, 100, 100, intensity))
+                self.cross_analysis_table.setItem(r, c, item)
+
+        self.cross_analysis_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.cross_analysis_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+
+        # --- 生成智能分析文本 ---
+        text = ""
         high_risk_items = df_analyzed[df_analyzed['危害性分类'].isin(["灾难的 (Catastrophic)", "危险的 (Hazardous)"])]
         text += f"当前共识别出 {len(high_risk_items)} 项高风险条目（灾难级或危险级）。\n\n"
 
-        if not high_risk_items.empty:
-            riskiest_func = high_risk_items['一级功能'].mode()
-            if not riskiest_func.empty:
-                text += f"风险主要集中在 “{riskiest_func[0]}” 系统中，请重点关注。\n\n"
+        if not cross_tab.empty:
+            high_risk_cols = [col for col in ["灾难的 (Catastrophic)", "危险的 (Hazardous)"] if
+                              col in cross_tab.columns]
+            if high_risk_cols:
+                top_func = cross_tab[high_risk_cols].sum(axis=1).idxmax()
+                top_func_cat_count = cross_tab.loc[
+                    top_func, "灾难的 (Catastrophic)"] if "灾难的 (Catastrophic)" in cross_tab.columns else 0
+                top_func_haz_count = cross_tab.loc[
+                    top_func, "危险的 (Hazardous)"] if "危险的 (Hazardous)" in cross_tab.columns else 0
 
-        text += "建议：请审查下方“高风险项 Top 5”列表，并为这些条目优先制定缓解措施。"
+                text += f"核心关注点：\n风险主要集中在 “{top_func}” 系统中，其中包含 {top_func_cat_count} 个“灾难级”和 {top_func_haz_count} 个“危险级”风险。\n\n"
+
+        text += "行动建议：\n请结合下方交叉分析矩阵，优先审查红色高亮区域对应的功能模块，并为这些风险制定缓解措施和验证计划。"
         self.summary_text.setText(text)
-
-    def _update_top_risks_table(self, df):
-        df_analyzed = df[df['危害性分类'] != ''].copy()
-        if df_analyzed.empty:
-            self.top_risks_table.setModel(None);
-            return
-
-        severity_map = {"灾难的 (Catastrophic)": 4, "危险的 (Hazardous)": 3, "严重的 (Major)": 2, "轻微的 (Minor)": 1,
-                        "无安全影响 (No Safety Effect)": 0}
-        df_analyzed['severity_score'] = df_analyzed['危害性分类'].map(severity_map)
-
-        top_5 = df_analyzed.sort_values(by='severity_score', ascending=False).head(5)
-
-        display_cols = ['编号', '一级功能', '失效状态', '危害性分类']
-        top_5_display = top_5[display_cols]
-
-        model = PandasModel(top_5_display)
-        self.top_risks_table.setModel(model)
-        self.top_risks_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
 
 
 # ------------------- 主窗口与应用入口 -------------------
@@ -631,7 +659,8 @@ class FHA_MainWindow(QMainWindow):
         header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
 
         self.dashboard_tab.set_model(self.fha_model)
-        self.dashboard_tab.refresh_dashboard()
+        if self.tabs.currentWidget() == self.dashboard_tab:
+            self.dashboard_tab.refresh_dashboard()
 
 
 if __name__ == "__main__":
