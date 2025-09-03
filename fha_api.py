@@ -1,6 +1,6 @@
 # fha_api.py
 """
-功能危险性分析 (Functional Hazard Analysis, FHA) API 模块
+功能危险性分析 (Functional Hazard Analysis, FHA) API 模块(源于fastAPI v1.0.0)
 
 本模块负责处理所有与FHA相关的数据操作和业务逻辑。
 它提供了一个完整的CRUD（创建、读取、更新、删除）功能的API，用于管理FHA表格数据。
@@ -322,4 +322,5 @@ def get_definitions():
         "hazard_categories": FHA_Model.ARP4761_CATEGORIES,
         "function_types": FUNCTION_TYPES,
         "mission_phases": MISSION_PHASES,
+
     }
